@@ -92,40 +92,36 @@ class ProductDatabase(object):
 		self._cursor = cursor
 		self._db = db
 
-	def parse_dictionary(self, d, depth):
-		"""Parse the product catalog looking into nested
-		   dictionaries as specified by depth."""
-		# list of elements to return
-		ret = []
-		depth_copy = depth
+	def get_dictionary(self, d):
 		for key, value in d.iteritems():
-			print "Value of depth : %r" % depth
-			# check for nested dictionary
-			if depth == 0:
-				key = 'all'
+			if isinstance(value, dict):
+				yield (key, value)
+			else:
+				yield (None, None)
 
-				print "Key : %r" % (key)
-				return [d[key]['description'], d[key]['url']]
+	def create_mysql_database(self):
 
-			if (isinstance(value, dict)):
-				depth -= 1
-				# check if going further down is allowed
-				if (depth >= 0):
-					desc, url = self.parse_dictionary(value, depth)
+		self.create_categories_table()
 
-				if (depth == 0):
-					print "Description: %r URL: %r" % (desc, url)
-					# restore depth value
-					depth = depth_copy
-					ret.append([desc, url])
-		return ret
+		for class_name, category in self.get_dictionary(self._d):
+			for subclass_name, subcategory in self.get_dictionary(category):
+				subclass_url = subcategory.get('url', "")
+				for type_name, type_dict in self.get_dictionary(subcategory):
+					if type_dict:
+						type_url = type_dict.get('url', {})
+					else:
+						type_url = ""
+						type_name= ""
 
-	def create_categories(self):
+					self.add_to_categories(class_name, subclass_name, \
+								subclass_url, type_name, \
+								type_url)
+
+					if not type_dict:
+						break
+
+	def create_categories_table(self):
 		"""Create product catagories table in mysql database."""
-		# The first level dictionary in product catalog contains
-		# product catagories
-		categories = self.parse_dictionary(self._d, 1)
-		print "Categories: ", categories
 
 		try :
 			self._cursor.execute("DROP TABLE IF EXISTS CATEGORIES")
@@ -133,30 +129,35 @@ class ProductDatabase(object):
 			print "Error deleting existing table"
 
 		sql = """CREATE TABLE CATEGORIES (
+			ID INT AUTO_INCREMENT,
+			CLASS VARCHAR(100),
+			SUBCLASS VARCHAR(100),
+			SUBCLASSURL VARCHAR(200),
 			TYPE VARCHAR(100),
-			URL VARCHAR(100),
-			PRIMARY KEY ( TYPE )
+			TYPEURL VARCHAR(200),
+			PRIMARY KEY ( ID )
 			)"""
 		try :
 			self._cursor.execute(sql)
 		except:
 			print "Error in executing SQL query"
 
-		for category in categories:
-			desc, url = category
-			print "type: %s url: %s" % (desc, url)
-			sql = """INSERT INTO CATEGORIES ( TYPE, URL)
-				VALUES ( \"%s\", \"%s\")""" % (desc, url)
+	def add_to_categories(self, class_name, subclass_name, subclass_url, \
+				type_name, type_url):
 
-			print "SQL: %r" % sql
-			try:
-				# Execute the SQL command
-				self._cursor.execute(sql)
-				# Commit your changes in the database
-				self._db.commit()
-			except:
-				# Rollback in case there is any error
-				self._db.rollback()
+		sql = """INSERT INTO CATEGORIES (
+			CLASS, SUBCLASS, SUBCLASSURL, TYPE, TYPEURL)
+			VALUES ( \"%s\", \"%s\", \"%s\", \"%s\", \"%s\")""" \
+			% (class_name, subclass_name, subclass_url, type_name, type_url)
+
+		try:
+			# Execute the SQL command
+			self._cursor.execute(sql)
+			# Commit your changes in the database
+			self._db.commit()
+		except:
+			# Rollback in case there is any error
+			self._db.rollback()
 
 # get a connection to database
 username = raw_input('Enter mysql username: ')
@@ -175,61 +176,67 @@ cursor.execute("SELECT VERSION()")
 version =  cursor.fetchone()
 print "Database version %s" % version
 
-# create a session to use same TCP connection for all requests
-s = requests.Session()
+use_cache = True
 
-main_page = s.get('http://www.ishopping.pk')
+if not use_cache:
+	# create a session to use same TCP connection for all requests
+	s = requests.Session()
 
-# check status code
-if main_page.status_code is not 200:
-	print "Failed to load page"
-	sys.exit(1)
-	
-# instantiate html parser and feed it html data
-parser = MYHTMLParser()
-parser.feed(main_page.text)
+	main_page = s.get('http://www.ishopping.pk')
 
-links = zip(parser.hyperlinks, parser.descriptions)
+	# check status code
+	if main_page.status_code is not 200:
+		print "Failed to load page"
+		sys.exit(1)
 
-# create a dictionary categorizing products
-product_catalog = defaultdict(defaultdict)
+	# instantiate html parser and feed it html data
+	parser = MYHTMLParser()
+	parser.feed(main_page.text)
 
-for link in links:
-	url, desc = link
-	# copy url for later use
-	urlcopy = url
-	url = url.split('/')
-	# ignore the base url
-	url = url[3:]
+	links = zip(parser.hyperlinks, parser.descriptions)
 
-	if len(url) == 1:
-		key, extension = url[0].split('.')
+	# create a dictionary categorizing products
+	product_catalog = defaultdict(defaultdict)
 
-		product_catalog[key] = {'all' : {'url' : urlcopy, 'description' : desc}}
-		tmp = product_catalog[key]
+	for link in links:
+		url, desc = link
+		# copy url for later use
+		urlcopy = url
+		url = url.split('/')
+		# ignore the base url
+		url = url[3:]
 
-	elif len(url) == 2:
-		#tmp = tmp.append({'testing' : {'url' : urlcopy, 'description' : desc}})
-		#tmp2 = tmp.append(tmp)
-		key, extension = url[1].split('.')
+		if len(url) == 1:
+			key, extension = url[0].split('.')
 
-		product_catalog[url[0]][key] = {'all' : {'url' : urlcopy, 'description' : desc}}
-	elif len(url) == 3:
-		# For example:
-		# [u'electronics', u'mobile-phones-and-tablet-pc', u'tablet-pc-price-in-pakistan.html']
-		key, extension = url[2].split('.')
+			product_catalog[key] = {'all' : {'url' : urlcopy, 'description' : desc}}
+			tmp = product_catalog[key]
 
-		product_catalog[url[0]][url[1]][key] = {'url' : urlcopy, 'description' : desc}
+		elif len(url) == 2:
+			#tmp = tmp.append({'testing' : {'url' : urlcopy, 'description' : desc}})
+			#tmp2 = tmp.append(tmp)
+			key, extension = url[1].split('.')
 
-print '*' * 100 
-# dump json file data for debugging purposes
-with open('catalog.txt', 'w') as outfile:
-	outfile.write(json.dumps(product_catalog, sort_keys=True, indent=4))
+			product_catalog[url[0]][key] = {'all' : {'url' : urlcopy, 'description' : desc}}
+		elif len(url) == 3:
+			# For example:
+			# [u'electronics', u'mobile-phones-and-tablet-pc', u'tablet-pc-price-in-pakistan.html']
+			key, extension = url[2].split('.')
+
+			product_catalog[url[0]][url[1]][key] = {'url' : urlcopy, 'description' : desc}
+
+	# dump json file data for debugging purposes
+	with open('catalog.txt', 'w') as outfile:
+		outfile.write(json.dumps(product_catalog, sort_keys=True, indent=4))
+else:
+	with open('catalog.txt', 'r') as infile:
+		text = infile.read()
+	product_catalog = json.loads(text)
 
 # start populating database
 database = ProductDatabase(product_catalog, db, cursor)
-database.create_categories()
-#parser.get_from_url(product_catalog)
+
+database.create_mysql_database()
 
 # close the database connectioni
 db.close()
